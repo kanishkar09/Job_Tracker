@@ -5,6 +5,27 @@ import {
   Bell, Clock, Send, Copy, CheckCircle2, LogOut, User, ArrowRight, Lock,
 } from "lucide-react";
 
+/* ---------------------------------------------------------------------------
+   Storage adapter.
+   The original ran inside Claude and used a hosted `window.storage` API.
+   This standalone build persists to the browser's localStorage instead,
+   exposing the same get/set/delete shape the app expects.
+--------------------------------------------------------------------------- */
+const storage = {
+  async get(key) {
+    const value = localStorage.getItem(key);
+    return value === null ? null : { key, value };
+  },
+  async set(key, value) {
+    localStorage.setItem(key, value);
+    return { key, value };
+  },
+  async delete(key) {
+    localStorage.removeItem(key);
+    return { key, deleted: true };
+  },
+};
+
 /* ----------------------------- design tokens ----------------------------- */
 const T = {
   bg: "#F4F5F8",
@@ -77,7 +98,7 @@ const initials = (name) => name.trim().split(/\s+/).slice(0, 2).map(w => w[0]?.t
 
 /* --- lightweight password protection (client-side lock, not real auth) --- */
 async function readUserRecord(key) {
-  try { const r = await window.storage.get(`user:${key}`); return r?.value ? JSON.parse(r.value) : null; }
+  try { const r = await storage.get(`user:${key}`); return r?.value ? JSON.parse(r.value) : null; }
   catch { return null; }
 }
 function randomSalt() {
@@ -311,10 +332,10 @@ export default function JobTracker() {
   useEffect(() => {
     (async () => {
       let list = [];
-      try { const r = await window.storage.get("userList"); if (r?.value) list = JSON.parse(r.value); } catch {}
+      try { const r = await storage.get("userList"); if (r?.value) list = JSON.parse(r.value); } catch {}
       setUserList(list);
       try {
-        const r = await window.storage.get("activeUser");
+        const r = await storage.get("activeUser");
         if (r?.value) { const f = list.find(u => u.key === r.value); if (f) setLastName(f.name); }
       } catch {}
       setBooted(true);
@@ -325,7 +346,7 @@ export default function JobTracker() {
   useEffect(() => {
     if (!user || !loaded) return;
     (async () => {
-      try { await window.storage.set(`user:${user.key}`, JSON.stringify({ name: user.name, apps, pass: user.pass })); }
+      try { await storage.set(`user:${user.key}`, JSON.stringify({ name: user.name, apps, pass: user.pass })); }
       catch (e) { console.error("save failed", e); }
     })();
   }, [apps, user, loaded]);
@@ -357,16 +378,16 @@ export default function JobTracker() {
       const hash = await hashPassword(password, salt);
       u = { key, name: trimmed, pass: { salt, hash } };
       isNew = true;
-      await window.storage.set(`user:${key}`, JSON.stringify({ name: trimmed, apps: [], pass: u.pass })).catch(() => {});
+      await storage.set(`user:${key}`, JSON.stringify({ name: trimmed, apps: [], pass: u.pass })).catch(() => {});
     }
 
     setUserList(prev => {
       const entry = { key, name: u.name };
       const next = prev.some(x => x.key === key) ? prev.map(x => x.key === key ? entry : x) : [...prev, entry];
-      window.storage.set("userList", JSON.stringify(next)).catch(() => {});
+      storage.set("userList", JSON.stringify(next)).catch(() => {});
       return next;
     });
-    window.storage.set("activeUser", key).catch(() => {});
+    storage.set("activeUser", key).catch(() => {});
 
     setApps(appsData);
     setUser(u);
