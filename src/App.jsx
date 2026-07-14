@@ -165,6 +165,14 @@ function Login() {
       if (mode === "signup") {
         const { data, error } = await supabase.auth.signUp({ email: mail, password: pw });
         if (error) throw error;
+        // when "Confirm email" is OFF, an existing email throws "User already registered" (caught below).
+        // when it's ON, Supabase hides that for privacy and instead returns a user with an EMPTY
+        // identities array — that's how we detect the account already exists.
+        if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+          setMode("signin");
+          setNotice("That email is already registered — sign in with your password below.");
+          return;
+        }
         // if email confirmation is OFF, a session is returned and the app opens automatically.
         if (!data.session) setNotice("Account created. Check your email to confirm, then sign in.");
       } else {
@@ -173,7 +181,14 @@ function Login() {
       }
       // on success with a session, the parent's auth listener swaps this screen out.
     } catch (e) {
-      setError(e?.message || "Something went wrong.");
+      const msg = e?.message || "Something went wrong.";
+      // "User already registered" is what sign-up throws when email confirmation is OFF.
+      if (/already registered/i.test(msg)) {
+        setMode("signin");
+        setNotice("That email is already registered — sign in with your password below.");
+      } else {
+        setError(msg);
+      }
     } finally {
       setBusy(false);
     }
