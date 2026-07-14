@@ -79,6 +79,31 @@ const avatarText = (s) => (s || "?").replace(/@.*/, "").slice(0, 2).toUpperCase(
 /* a stable id for a new application (also used as its storage folder name) */
 const newId = () => "a" + Date.now() + Math.random().toString(36).slice(2, 6);
 
+/* --------------------------- username <-> email --------------------------- */
+/* Supabase signs users in by email, so a username is mapped to a hidden email
+   like "alice@jobtracker.app". Sign-in accepts either: anything containing "@"
+   is treated as a real email, otherwise it's a username. */
+const USERNAME_DOMAIN = "jobtracker.app";
+const USERNAME_RE = /^[a-z0-9._-]{3,30}$/;
+const toLoginEmail = (id) => (id.includes("@") ? id.trim() : `${id.trim().toLowerCase()}@${USERNAME_DOMAIN}`);
+/* what to show in the UI: hide the synthetic domain, show the plain username */
+const displayName = (user) => {
+  const e = user?.email || "";
+  return e.endsWith("@" + USERNAME_DOMAIN) ? e.slice(0, -(USERNAME_DOMAIN.length + 1)) : e;
+};
+
+/* Google "G" logo (lucide has no brand icons) */
+function GoogleIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true">
+      <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z" />
+      <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z" />
+      <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.28-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z" />
+      <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z" />
+    </svg>
+  );
+}
+
 /* ------------------------- tailored documents (files) --------------------- */
 const DOC_BUCKET = "documents";
 const ALLOWED_EXT = new Set(["pdf", "doc", "docx"]);
@@ -174,35 +199,54 @@ function InlineStatus({ value, onChange }) {
 /* ------------------------------- login ------------------------------------ */
 function Login() {
   const [mode, setMode] = useState("signin"); // 'signin' | 'signup'
-  const [email, setEmail] = useState("");
+  const [ident, setIdent] = useState("");     // username OR email
   const [pw, setPw] = useState("");
   const [busy, setBusy] = useState(false);
+  const [gbusy, setGbusy] = useState(false);  // google redirect in progress
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
   const inStyle = { width: "100%", padding: "12px 12px 12px 40px", borderRadius: 11, border: "1px solid rgba(255,255,255,.16)", background: "rgba(0,0,0,.2)", color: "#fff", fontSize: 15, fontFamily: "inherit" };
 
+  const google = async () => {
+    setError(""); setNotice(""); setGbusy(true);
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: "google",
+        options: { redirectTo: window.location.origin },
+      });
+      if (error) throw error;
+      // the browser redirects to Google; on return the app opens automatically.
+    } catch (e) {
+      setError(e?.message || "Google sign-in failed.");
+      setGbusy(false);
+    }
+  };
+
   const submit = async () => {
     if (busy) return;
     setError(""); setNotice("");
-    const mail = email.trim();
-    if (!mail || !pw) { setError("Enter your email and password."); return; }
-    if (mode === "signup" && pw.length < 6) { setError("Password must be at least 6 characters."); return; }
+    const id = ident.trim();
+    if (!id || !pw) { setError("Enter your username and password."); return; }
+    if (mode === "signup") {
+      if (id.includes("@")) { setError("Pick a username (letters and numbers), not an email."); return; }
+      if (!USERNAME_RE.test(id.toLowerCase())) { setError("Username must be 3–30 characters: letters, numbers, . _ or -"); return; }
+      if (pw.length < 6) { setError("Password must be at least 6 characters."); return; }
+    }
+    const mail = toLoginEmail(id);
     setBusy(true);
     try {
       if (mode === "signup") {
         const { data, error } = await supabase.auth.signUp({ email: mail, password: pw });
         if (error) throw error;
-        // when "Confirm email" is OFF, an existing email throws "User already registered" (caught below).
-        // when it's ON, Supabase hides that for privacy and instead returns a user with an EMPTY
-        // identities array — that's how we detect the account already exists.
+        // an already-taken username comes back with an empty identities array.
         if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
           setMode("signin");
-          setNotice("That email is already registered — sign in with your password below.");
+          setNotice("That username is already taken — sign in with your password below.");
           return;
         }
-        // if email confirmation is OFF, a session is returned and the app opens automatically.
-        if (!data.session) setNotice("Account created. Check your email to confirm, then sign in.");
+        // with email confirmation OFF (required for username sign-up), a session is returned.
+        if (!data.session) setNotice("Account created — you can sign in now.");
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email: mail, password: pw });
         if (error) throw error;
@@ -210,10 +254,11 @@ function Login() {
       // on success with a session, the parent's auth listener swaps this screen out.
     } catch (e) {
       const msg = e?.message || "Something went wrong.";
-      // "User already registered" is what sign-up throws when email confirmation is OFF.
       if (/already registered/i.test(msg)) {
         setMode("signin");
-        setNotice("That email is already registered — sign in with your password below.");
+        setNotice("That account already exists — sign in with your password below.");
+      } else if (/invalid login credentials/i.test(msg)) {
+        setError("Wrong username/email or password.");
       } else {
         setError(msg);
       }
@@ -245,12 +290,24 @@ function Login() {
         </div>
 
         <div style={{ background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.1)", borderRadius: 16, padding: 22 }}>
-          <label style={{ display: "block", fontSize: 12.5, fontWeight: 600, color: "#C7CEDC", marginBottom: 8 }}>Email</label>
+          <button className="lg-btn" onClick={google} disabled={gbusy || busy}
+            style={{ width: "100%", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 10, background: "#fff", color: "#1F2937", border: "none", padding: "12px", borderRadius: 11, fontSize: 14.5, fontWeight: 600, fontFamily: "inherit", opacity: (gbusy || busy) ? .7 : 1 }}>
+            <GoogleIcon /> {gbusy ? "Redirecting…" : "Continue with Google"}
+          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "16px 0" }}>
+            <div style={{ flex: 1, height: 1, background: "rgba(255,255,255,.12)" }} />
+            <span style={{ fontSize: 12, color: "#7C889E" }}>or</span>
+            <div style={{ flex: 1, height: 1, background: "rgba(255,255,255,.12)" }} />
+          </div>
+
+          <label style={{ display: "block", fontSize: 12.5, fontWeight: 600, color: "#C7CEDC", marginBottom: 8 }}>
+            {mode === "signin" ? "Username or email" : "Choose a username"}
+          </label>
           <div style={{ position: "relative" }}>
             <User size={17} color={T.faint} style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)" }} />
-            <input className="lg-in" autoFocus type="email" value={email} onChange={e => setEmail(e.target.value)}
+            <input className="lg-in" autoFocus value={ident} onChange={e => setIdent(e.target.value)}
               onKeyDown={e => e.key === "Enter" && document.getElementById("lg-pw")?.focus()}
-              placeholder="you@example.com" style={inStyle} />
+              placeholder={mode === "signin" ? "yourname  or  you@example.com" : "yourname"} style={inStyle} />
           </div>
 
           <label style={{ display: "block", fontSize: 12.5, fontWeight: 600, color: "#C7CEDC", margin: "14px 0 8px" }}>Password</label>
@@ -420,7 +477,7 @@ export default function JobTracker() {
   if (!session) {
     return <Login />;
   }
-  const who = session.user.email;
+  const who = displayName(session.user);
 
   return (
     <div style={{ fontFamily: "'Inter', ui-sans-serif, system-ui, sans-serif", background: T.bg, color: T.ink, minHeight: "100vh" }}>
