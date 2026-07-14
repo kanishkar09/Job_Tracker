@@ -1,30 +1,10 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   Plus, Search, X, Pencil, Trash2, ExternalLink, MapPin,
   Calendar, Building2, Briefcase, ChevronDown, Inbox, Check,
   Bell, Clock, Send, Copy, CheckCircle2, LogOut, User, ArrowRight, Lock,
 } from "lucide-react";
-
-/* ---------------------------------------------------------------------------
-   Storage adapter.
-   The original ran inside Claude and used a hosted `window.storage` API.
-   This standalone build persists to the browser's localStorage instead,
-   exposing the same get/set/delete shape the app expects.
---------------------------------------------------------------------------- */
-const storage = {
-  async get(key) {
-    const value = localStorage.getItem(key);
-    return value === null ? null : { key, value };
-  },
-  async set(key, value) {
-    localStorage.setItem(key, value);
-    return { key, value };
-  },
-  async delete(key) {
-    localStorage.removeItem(key);
-    return { key, deleted: true };
-  },
-};
+import { supabase } from "./supabaseClient";
 
 /* ----------------------------- design tokens ----------------------------- */
 const T = {
@@ -92,32 +72,8 @@ const prettyDate = (d) => {
   return dt.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 };
 const hostname = (url) => { try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return url; } };
-/* storage keys can't contain whitespace, slashes, or quotes */
-const sanitizeKey = (name) => name.trim().toLowerCase().replace(/['"\/\\]/g, "").replace(/\s+/g, "_").slice(0, 60) || "user";
-const initials = (name) => name.trim().split(/\s+/).slice(0, 2).map(w => w[0]?.toUpperCase()).join("") || "?";
-
-/* --- lightweight password protection (client-side lock, not real auth) --- */
-async function readUserRecord(key) {
-  try { const r = await storage.get(`user:${key}`); return r?.value ? JSON.parse(r.value) : null; }
-  catch { return null; }
-}
-function randomSalt() {
-  const a = new Uint8Array(12);
-  (window.crypto || {}).getRandomValues?.(a);
-  return Array.from(a).map(b => b.toString(16).padStart(2, "0")).join("") || String(Date.now());
-}
-async function hashPassword(password, salt) {
-  const input = salt + ":" + password;
-  try {
-    const buf = await window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
-    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
-  } catch {
-    // fallback if SubtleCrypto is unavailable — weaker, but this lock isn't real security anyway
-    let h = 5381;
-    for (let i = 0; i < input.length; i++) h = ((h << 5) + h + input.charCodeAt(i)) >>> 0;
-    return "fb" + h.toString(16);
-  }
-}
+/* two-letter avatar text from an email or name */
+const avatarText = (s) => (s || "?").replace(/@.*/, "").slice(0, 2).toUpperCase();
 
 /* ---- date math for reminders ---- */
 const parseDay = (d) => { const dt = new Date(d + "T00:00:00"); return isNaN(dt) ? null : dt; };
@@ -188,38 +144,40 @@ function InlineStatus({ value, onChange }) {
 }
 
 /* ------------------------------- login ------------------------------------ */
-function Login({ existing, lastName, onLookup, onAuth }) {
-  const [step, setStep] = useState("name");      // 'name' | 'password'
-  const [name, setName] = useState(lastName || "");
-  const [exists, setExists] = useState(false);   // account already has a password
+function Login() {
+  const [mode, setMode] = useState("signin"); // 'signin' | 'signup'
+  const [email, setEmail] = useState("");
   const [pw, setPw] = useState("");
-  const [pw2, setPw2] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
 
-  const toPassword = async (chosenName) => {
-    const n = (chosenName ?? name).trim();
-    if (!n) return;
-    setName(n); setError(""); setBusy(true);
-    const { exists } = await onLookup(n);
-    setExists(exists);
-    setPw(""); setPw2("");
-    setStep("password");
-    setBusy(false);
-  };
+  const inStyle = { width: "100%", padding: "12px 12px 12px 40px", borderRadius: 11, border: "1px solid rgba(255,255,255,.16)", background: "rgba(0,0,0,.2)", color: "#fff", fontSize: 15, fontFamily: "inherit" };
 
   const submit = async () => {
     if (busy) return;
-    if (!exists && pw !== pw2) { setError("Passwords don't match."); return; }
-    setBusy(true); setError("");
-    const res = await onAuth(name, pw);
-    if (!res.ok) { setError(res.error || "Something went wrong."); setBusy(false); }
-    // on success the parent unmounts this screen
+    setError(""); setNotice("");
+    const mail = email.trim();
+    if (!mail || !pw) { setError("Enter your email and password."); return; }
+    if (mode === "signup" && pw.length < 6) { setError("Password must be at least 6 characters."); return; }
+    setBusy(true);
+    try {
+      if (mode === "signup") {
+        const { data, error } = await supabase.auth.signUp({ email: mail, password: pw });
+        if (error) throw error;
+        // if email confirmation is OFF, a session is returned and the app opens automatically.
+        if (!data.session) setNotice("Account created. Check your email to confirm, then sign in.");
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({ email: mail, password: pw });
+        if (error) throw error;
+      }
+      // on success with a session, the parent's auth listener swaps this screen out.
+    } catch (e) {
+      setError(e?.message || "Something went wrong.");
+    } finally {
+      setBusy(false);
+    }
   };
-
-  const back = () => { setStep("name"); setError(""); setPw(""); setPw2(""); };
-
-  const inStyle = { width: "100%", padding: "12px 12px 12px 40px", borderRadius: 11, border: "1px solid rgba(255,255,255,.16)", background: "rgba(0,0,0,.2)", color: "#fff", fontSize: 15, fontFamily: "inherit" };
 
   return (
     <div style={{ fontFamily: "'Inter', ui-sans-serif, system-ui, sans-serif", background: T.chrome, color: "#fff", minHeight: "100vh", display: "grid", placeItems: "center", padding: 20 }}>
@@ -229,7 +187,6 @@ function Login({ existing, lastName, onLookup, onAuth }) {
         .lg-in:focus { outline: none; border-color: ${T.accent}; box-shadow: 0 0 0 3px rgba(14,124,102,.3); }
         .lg-btn { transition: background .15s, transform .05s; cursor: pointer; }
         .lg-btn:active { transform: translateY(1px); }
-        .lg-user:hover { background: rgba(255,255,255,.09); }
       `}</style>
       <div style={{ width: "100%", maxWidth: 400 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 26 }}>
@@ -239,74 +196,43 @@ function Login({ existing, lastName, onLookup, onAuth }) {
           <div>
             <h1 style={{ margin: 0, fontFamily: "'Space Grotesk', sans-serif", fontSize: 22, fontWeight: 700 }}>Job Application Tracker</h1>
             <p style={{ margin: "2px 0 0", fontSize: 13.5, color: "#9AA4B8" }}>
-              {step === "name" ? "Enter your name to open your tracker." : exists ? `Welcome back, ${name}.` : `Set a password for ${name}.`}
+              {mode === "signin" ? "Sign in to your tracker." : "Create an account to get started."}
             </p>
           </div>
         </div>
 
         <div style={{ background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.1)", borderRadius: 16, padding: 22 }}>
-          {step === "name" ? (
-            <>
-              <label style={{ display: "block", fontSize: 12.5, fontWeight: 600, color: "#C7CEDC", marginBottom: 8 }}>Your name or username</label>
-              <div style={{ position: "relative" }}>
-                <User size={17} color={T.faint} style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)" }} />
-                <input className="lg-in" autoFocus value={name} onChange={e => setName(e.target.value)}
-                  onKeyDown={e => e.key === "Enter" && toPassword()} placeholder="e.g. Aoife or aoife_m" style={inStyle} />
-              </div>
-              <button className="lg-btn" onClick={() => toPassword()} disabled={!name.trim() || busy}
-                style={{ width: "100%", marginTop: 14, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8, background: T.accent, color: "#fff", border: "none", padding: "12px", borderRadius: 11, fontSize: 15, fontWeight: 600, fontFamily: "inherit", opacity: name.trim() && !busy ? 1 : .5, cursor: name.trim() ? "pointer" : "default" }}>
-                Continue <ArrowRight size={17} />
-              </button>
+          <label style={{ display: "block", fontSize: 12.5, fontWeight: 600, color: "#C7CEDC", marginBottom: 8 }}>Email</label>
+          <div style={{ position: "relative" }}>
+            <User size={17} color={T.faint} style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)" }} />
+            <input className="lg-in" autoFocus type="email" value={email} onChange={e => setEmail(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && document.getElementById("lg-pw")?.focus()}
+              placeholder="you@example.com" style={inStyle} />
+          </div>
 
-              {existing.length > 0 && (
-                <div style={{ marginTop: 20 }}>
-                  <div style={{ fontSize: 12, color: T.faint, marginBottom: 8, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".05em" }}>Continue as</div>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    {existing.map(u => (
-                      <button key={u.key} className="lg-btn lg-user" onClick={() => toPassword(u.name)}
-                        style={{ display: "flex", alignItems: "center", gap: 10, background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.1)", color: "#fff", padding: "9px 12px", borderRadius: 10, fontSize: 14, fontWeight: 600, textAlign: "left", fontFamily: "inherit" }}>
-                        <span style={{ width: 28, height: 28, borderRadius: "50%", background: T.accent, display: "grid", placeItems: "center", fontSize: 11.5, fontWeight: 700, flexShrink: 0 }}>{initials(u.name)}</span>
-                        {u.name}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </>
-          ) : (
-            <>
-              <label style={{ display: "block", fontSize: 12.5, fontWeight: 600, color: "#C7CEDC", marginBottom: 8 }}>
-                {exists ? "Password" : "Create a password"}
-              </label>
-              <div style={{ position: "relative" }}>
-                <Lock size={16} color={T.faint} style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)" }} />
-                <input className="lg-in" autoFocus type="password" value={pw} onChange={e => setPw(e.target.value)}
-                  onKeyDown={e => e.key === "Enter" && (exists ? submit() : document.getElementById("lg-pw2")?.focus())}
-                  placeholder={exists ? "Enter your password" : "At least 4 characters"} style={inStyle} />
-              </div>
-              {!exists && (
-                <div style={{ position: "relative", marginTop: 10 }}>
-                  <Lock size={16} color={T.faint} style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)" }} />
-                  <input id="lg-pw2" className="lg-in" type="password" value={pw2} onChange={e => setPw2(e.target.value)}
-                    onKeyDown={e => e.key === "Enter" && submit()} placeholder="Confirm password" style={inStyle} />
-                </div>
-              )}
+          <label style={{ display: "block", fontSize: 12.5, fontWeight: 600, color: "#C7CEDC", margin: "14px 0 8px" }}>Password</label>
+          <div style={{ position: "relative" }}>
+            <Lock size={16} color={T.faint} style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)" }} />
+            <input id="lg-pw" className="lg-in" type="password" value={pw} onChange={e => setPw(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && submit()}
+              placeholder={mode === "signup" ? "At least 6 characters" : "Your password"} style={inStyle} />
+          </div>
 
-              {error && <p style={{ margin: "12px 0 0", fontSize: 13, color: "#FF9B8A", fontWeight: 500 }}>{error}</p>}
+          {error && <p style={{ margin: "12px 0 0", fontSize: 13, color: "#FF9B8A", fontWeight: 500 }}>{error}</p>}
+          {notice && <p style={{ margin: "12px 0 0", fontSize: 13, color: "#8FE3C3", fontWeight: 500 }}>{notice}</p>}
 
-              <button className="lg-btn" onClick={submit} disabled={busy || !pw}
-                style={{ width: "100%", marginTop: 14, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8, background: T.accent, color: "#fff", border: "none", padding: "12px", borderRadius: 11, fontSize: 15, fontWeight: 600, fontFamily: "inherit", opacity: busy || !pw ? .5 : 1, cursor: pw ? "pointer" : "default" }}>
-                {busy ? "Please wait…" : exists ? <>Unlock my tracker <ArrowRight size={17} /></> : <>Create account <ArrowRight size={17} /></>}
-              </button>
-              <button className="lg-btn" onClick={back} disabled={busy}
-                style={{ width: "100%", marginTop: 8, background: "transparent", color: "#9AA4B8", border: "none", padding: "8px", fontSize: 13.5, fontWeight: 600, fontFamily: "inherit" }}>
-                ← Use a different name
-              </button>
-            </>
-          )}
+          <button className="lg-btn" onClick={submit} disabled={busy}
+            style={{ width: "100%", marginTop: 16, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8, background: T.accent, color: "#fff", border: "none", padding: "12px", borderRadius: 11, fontSize: 15, fontWeight: 600, fontFamily: "inherit", opacity: busy ? .6 : 1 }}>
+            {busy ? "Please wait…" : mode === "signin" ? <>Sign in <ArrowRight size={17} /></> : <>Create account <ArrowRight size={17} /></>}
+          </button>
+
+          <button className="lg-btn" onClick={() => { setMode(mode === "signin" ? "signup" : "signin"); setError(""); setNotice(""); }} disabled={busy}
+            style={{ width: "100%", marginTop: 10, background: "transparent", color: "#9AA4B8", border: "none", padding: "6px", fontSize: 13.5, fontWeight: 600, fontFamily: "inherit" }}>
+            {mode === "signin" ? "New here? Create an account" : "Already have an account? Sign in"}
+          </button>
         </div>
         <p style={{ fontSize: 12, color: T.faint, marginTop: 14, textAlign: "center", lineHeight: 1.5 }}>
-          Each name keeps its own separate list, protected by a password. This is a lightweight lock, not bank-grade security — avoid storing anything truly sensitive.
+          Your account and applications are stored securely in the cloud and sync across every device you sign in from.
         </p>
       </div>
     </div>
@@ -315,88 +241,63 @@ function Login({ existing, lastName, onLookup, onAuth }) {
 
 /* -------------------------------- app ----------------------------------- */
 export default function JobTracker() {
-  const [user, setUser] = useState(null);       // { key, name, pass }
-  const [userList, setUserList] = useState([]);  // [{ key, name }]
-  const [lastName, setLastName] = useState("");  // prefill on the login screen
-  const [booted, setBooted] = useState(false);   // finished initial storage check
+  const [session, setSession] = useState(null);  // Supabase auth session
+  const [booted, setBooted] = useState(false);   // finished initial session check
   const [apps, setApps] = useState([]);
-  const [loaded, setLoaded] = useState(false);   // finished loading this user's apps
+  const [loaded, setLoaded] = useState(false);   // finished loading this user's data
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("All");
   const [modal, setModal] = useState(null); // {mode:'add'|'edit', form, id?}
   const [confirmDel, setConfirmDel] = useState(null);
   const [draft, setDraft] = useState(null); // {app, isSecond}
+  const saveTimer = useRef(null);
 
-  /* boot: read the account list and who was last active (for prefill only).
-     we intentionally do NOT auto-open — the password must be entered each time. */
+  /* boot: get the current session, then keep it in sync with auth changes */
   useEffect(() => {
+    let sub;
     (async () => {
-      let list = [];
-      try { const r = await storage.get("userList"); if (r?.value) list = JSON.parse(r.value); } catch {}
-      setUserList(list);
-      try {
-        const r = await storage.get("activeUser");
-        if (r?.value) { const f = list.find(u => u.key === r.value); if (f) setLastName(f.name); }
-      } catch {}
+      const { data } = await supabase.auth.getSession();
+      setSession(data.session);
       setBooted(true);
+      sub = supabase.auth.onAuthStateChange((_event, s) => setSession(s)).data.subscription;
     })();
+    return () => sub?.unsubscribe();
   }, []);
 
-  /* persist this user's applications whenever they change (keeping their password hash) */
+  /* load this user's applications from the database whenever the session changes */
   useEffect(() => {
-    if (!user || !loaded) return;
+    if (!session) { setApps([]); setLoaded(false); return; }
+    let cancelled = false;
     (async () => {
-      try { await storage.set(`user:${user.key}`, JSON.stringify({ name: user.name, apps, pass: user.pass })); }
-      catch (e) { console.error("save failed", e); }
+      setLoaded(false);
+      const { data, error } = await supabase
+        .from("trackers")
+        .select("apps")
+        .eq("user_id", session.user.id)
+        .maybeSingle();
+      if (cancelled) return;
+      if (error) console.error("load failed", error);
+      setApps(Array.isArray(data?.apps) ? data.apps : []);
+      setLoaded(true);
     })();
-  }, [apps, user, loaded]);
+    return () => { cancelled = true; };
+  }, [session]);
 
-  /* check whether a name already has an account (so login can ask to create vs enter a password) */
-  async function lookup(name) {
-    const rec = await readUserRecord(sanitizeKey(name));
-    return { exists: !!(rec && rec.pass) };
-  }
+  /* save applications back to the database (debounced) whenever they change */
+  useEffect(() => {
+    if (!session || !loaded) return;
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      const { error } = await supabase
+        .from("trackers")
+        .upsert({ user_id: session.user.id, apps, updated_at: new Date().toISOString() });
+      if (error) console.error("save failed", error);
+    }, 600);
+    return () => clearTimeout(saveTimer.current);
+  }, [apps, session, loaded]);
 
-  /* create a new account, or verify an existing one, then open it.
-     returns { ok, isNew?, error? } */
-  async function authenticate(name, password) {
-    const trimmed = name.trim();
-    if (!trimmed) return { ok: false, error: "Enter a name." };
-    if (!password) return { ok: false, error: "Enter a password." };
-    const key = sanitizeKey(trimmed);
-    const rec = await readUserRecord(key);
-
-    let u, appsData = [], isNew = false;
-    if (rec && rec.pass) {
-      const hash = await hashPassword(password, rec.pass.salt);
-      if (hash !== rec.pass.hash) return { ok: false, error: "Incorrect password. Try again." };
-      u = { key, name: rec.name || trimmed, pass: rec.pass };
-      appsData = rec.apps || [];
-    } else {
-      if (password.length < 4) return { ok: false, error: "Use at least 4 characters." };
-      const salt = randomSalt();
-      const hash = await hashPassword(password, salt);
-      u = { key, name: trimmed, pass: { salt, hash } };
-      isNew = true;
-      await storage.set(`user:${key}`, JSON.stringify({ name: trimmed, apps: [], pass: u.pass })).catch(() => {});
-    }
-
-    setUserList(prev => {
-      const entry = { key, name: u.name };
-      const next = prev.some(x => x.key === key) ? prev.map(x => x.key === key ? entry : x) : [...prev, entry];
-      storage.set("userList", JSON.stringify(next)).catch(() => {});
-      return next;
-    });
-    storage.set("activeUser", key).catch(() => {});
-
-    setApps(appsData);
-    setUser(u);
-    setLoaded(true);
-    return { ok: true, isNew };
-  }
-
-  function switchUser() {
-    setUser(null);
+  async function switchUser() {
+    await supabase.auth.signOut();
     setApps([]);
     setLoaded(false);
     setQuery(""); setFilter("All");
@@ -468,9 +369,10 @@ export default function JobTracker() {
   if (!booted) {
     return <div style={{ fontFamily: "'Inter', sans-serif", background: T.bg, minHeight: "100vh", display: "grid", placeItems: "center", color: T.faint }}>Loading…</div>;
   }
-  if (!user) {
-    return <Login existing={userList} lastName={lastName} onLookup={lookup} onAuth={authenticate} />;
+  if (!session) {
+    return <Login />;
   }
+  const who = session.user.email;
 
   return (
     <div style={{ fontFamily: "'Inter', ui-sans-serif, system-ui, sans-serif", background: T.bg, color: T.ink, minHeight: "100vh" }}>
@@ -510,7 +412,7 @@ export default function JobTracker() {
                   Job Application Tracker
                 </h1>
                 <p style={{ margin: "2px 0 0", fontSize: 13, color: "#9AA4B8" }}>
-                  Signed in as {user.name}
+                  Signed in as {who}
                 </p>
               </div>
             </div>
@@ -526,8 +428,8 @@ export default function JobTracker() {
                 <Plus size={17} strokeWidth={2.4} /> Add application
               </button>
               <div style={{ display: "flex", alignItems: "center", gap: 8, paddingLeft: 4 }}>
-                <span title={user.name} style={{ width: 34, height: 34, borderRadius: "50%", background: "rgba(255,255,255,.14)", border: "1px solid rgba(255,255,255,.2)", display: "grid", placeItems: "center", fontSize: 12.5, fontWeight: 700, letterSpacing: ".02em", flexShrink: 0 }}>
-                  {initials(user.name)}
+                <span title={who} style={{ width: 34, height: 34, borderRadius: "50%", background: "rgba(255,255,255,.14)", border: "1px solid rgba(255,255,255,.2)", display: "grid", placeItems: "center", fontSize: 12.5, fontWeight: 700, letterSpacing: ".02em", flexShrink: 0 }}>
+                  {avatarText(who)}
                 </span>
                 <button className="jt-btn" onClick={switchUser} title="Switch user"
                   style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "transparent", color: "#C7CEDC", border: "1px solid rgba(255,255,255,.18)", padding: "8px 12px", borderRadius: 10, fontSize: 13, fontWeight: 600, fontFamily: "inherit" }}>
@@ -680,7 +582,7 @@ export default function JobTracker() {
         )}
 
         <p style={{ fontSize: 12, color: T.faint, marginTop: 14, textAlign: "center" }}>
-          Saved automatically under {user.name}. Use “Switch” up top to open a different person’s list.
+          Synced to your account ({who}) — sign in from any device or browser to see the same list.
         </p>
       </main>
 

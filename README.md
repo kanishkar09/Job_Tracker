@@ -1,9 +1,15 @@
 # Job Application Tracker
 
 A React + Vite app for tracking job applications: add/edit/delete entries,
-change status inline, get follow-up reminders, keep separate password-protected
-lists per person, and see salaries in euros. Data is saved in the browser via
-`localStorage`.
+change status inline, get follow-up reminders, and see salaries in euros.
+Accounts and data are stored in **Supabase** (real email/password auth + a
+cloud database), so your list syncs across every device and browser you sign
+in from.
+
+## ⚠️ First: set up Supabase
+Before running or deploying, do the one-time setup in **`SUPABASE_SETUP.md`**
+(create a free project, run one SQL snippet, paste two keys into
+`src/supabaseClient.js`). The app won't sign in until those two keys are filled.
 
 ## Run locally
 
@@ -69,18 +75,19 @@ job-tracker/
 ├── index.html            # HTML entry
 ├── package.json          # dependencies + scripts
 ├── vite.config.js        # Vite + React plugin
+├── SUPABASE_SETUP.md     # one-time backend setup (read this first)
 ├── .gitignore
 └── src/
     ├── main.jsx          # mounts <App/>
     ├── index.css         # minimal global reset
-    └── App.jsx           # the whole app (with a localStorage adapter at the top)
+    ├── supabaseClient.js # paste your Supabase URL + anon key here
+    └── App.jsx           # the whole app
 ```
 
-## Note on the password
+## Note on security
 
-The password is a client-side lock, not real authentication. The data and the
-(hashed) password live in the same browser storage the app reads, so a
-technical person could read entries via browser dev tools without the password.
-It keeps casual users out; it does not protect truly sensitive data. Real
-verification would require a backend (e.g. Supabase/Firebase auth or a custom
-API with a database).
+Auth and data now live in Supabase, not the browser. Passwords are handled by
+Supabase Auth (hashed server-side; never stored in your code or the browser),
+and Row Level Security ensures each signed-in user can only read and write their
+own applications. The `anon` key in `src/supabaseClient.js` is a public,
+browser-safe key — it is not a secret and is protected by those RLS policies.
