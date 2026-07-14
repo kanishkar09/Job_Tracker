@@ -3,6 +3,7 @@ import {
   Plus, Search, X, Pencil, Trash2, ExternalLink, MapPin,
   Calendar, Building2, Briefcase, ChevronDown, Inbox, Check,
   Bell, Clock, Send, Copy, CheckCircle2, LogOut, User, ArrowRight, Lock,
+  FileText, Upload,
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
@@ -57,6 +58,7 @@ const EMPTY_FORM = {
   company: "", position: "", salary: "", location: "",
   listing: "", date: new Date().toISOString().slice(0, 10),
   method: "Online Job Portal", status: "Applied", notes: "",
+  resume: null, cover: null,
 };
 
 /* ------------------------------- helpers ---------------------------------- */
@@ -74,6 +76,32 @@ const prettyDate = (d) => {
 const hostname = (url) => { try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return url; } };
 /* two-letter avatar text from an email or name */
 const avatarText = (s) => (s || "?").replace(/@.*/, "").slice(0, 2).toUpperCase();
+/* a stable id for a new application (also used as its storage folder name) */
+const newId = () => "a" + Date.now() + Math.random().toString(36).slice(2, 6);
+
+/* ------------------------- tailored documents (files) --------------------- */
+const DOC_BUCKET = "documents";
+const ALLOWED_EXT = new Set(["pdf", "doc", "docx"]);
+const MAX_DOC_MB = 10;
+const extOf = (name) => (name.split(".").pop() || "").toLowerCase();
+const prettySize = (b) =>
+  b < 1024 ? `${b} B` : b < 1048576 ? `${(b / 1024).toFixed(0)} KB` : `${(b / 1048576).toFixed(1)} MB`;
+
+/* upload to documents/<userId>/<appId>/<kind>-<ts>.<ext>; returns the file's metadata */
+async function uploadDoc(userId, appId, kind, file) {
+  const path = `${userId}/${appId}/${kind}-${Date.now()}.${extOf(file.name)}`;
+  const { error } = await supabase.storage.from(DOC_BUCKET)
+    .upload(path, file, { upsert: false, contentType: file.type || undefined });
+  if (error) throw error;
+  return { path, name: file.name, size: file.size, uploadedAt: new Date().toISOString() };
+}
+/* short-lived signed URL for viewing a private file */
+async function docUrl(path) {
+  const { data, error } = await supabase.storage.from(DOC_BUCKET).createSignedUrl(path, 120);
+  if (error) throw error;
+  return data.signedUrl;
+}
+const removeDoc = (path) => supabase.storage.from(DOC_BUCKET).remove([path]).catch(() => {});
 
 /* ---- date math for reminders ---- */
 const parseDay = (d) => { const dt = new Date(d + "T00:00:00"); return isNaN(dt) ? null : dt; };
@@ -337,19 +365,24 @@ export default function JobTracker() {
       .sort((a, b) => (b.date || "").localeCompare(a.date || ""));
   }, [apps, query, filter]);
 
-  const openAdd = () => setModal({ mode: "add", form: { ...EMPTY_FORM } });
+  const openAdd = () => setModal({ mode: "add", id: newId(), form: { ...EMPTY_FORM } });
   const openEdit = (a) => setModal({ mode: "edit", id: a.id, form: { ...a } });
 
   const save = (form) => {
     if (!form.company.trim() || !form.position.trim()) return;
     if (modal.mode === "add") {
-      setApps(p => [...p, { ...form, id: "a" + Date.now() + Math.random().toString(36).slice(2, 6) }]);
+      setApps(p => [...p, { ...form, id: modal.id }]);
     } else {
       setApps(p => p.map(a => a.id === modal.id ? { ...form, id: modal.id } : a));
     }
     setModal(null);
   };
-  const remove = (id) => { setApps(p => p.filter(a => a.id !== id)); setConfirmDel(null); };
+  const remove = (id) => {
+    const a = apps.find(x => x.id === id);
+    [a?.resume?.path, a?.cover?.path].forEach(p => p && removeDoc(p));
+    setApps(p => p.filter(x => x.id !== id));
+    setConfirmDel(null);
+  };
   const updateStatus = (id, status) => setApps(p => p.map(a => a.id === id ? { ...a, status } : a));
   const markReminderDone = (id, key) =>
     setApps(p => p.map(a => a.id === id ? { ...a, done: { ...(a.done || {}), [key]: true } } : a));
@@ -545,10 +578,10 @@ export default function JobTracker() {
           </div>
         ) : (
           <div className="jt-scroll" style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, overflow: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 940 }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 1040 }}>
               <thead>
                 <tr style={{ background: "#FAFBFC" }}>
-                  {["Company & Role", "Salary", "Location", "Applied", "Method", "Status", "Link", ""].map((h, i) => (
+                  {["Company & Role", "Salary", "Location", "Applied", "Method", "Status", "Docs", "Link", ""].map((h, i) => (
                     <th key={i} style={{
                       textAlign: i === 1 ? "right" : "left", padding: "12px 16px", fontSize: 11.5,
                       fontWeight: 600, color: T.faint, textTransform: "uppercase", letterSpacing: ".04em",
@@ -572,6 +605,7 @@ export default function JobTracker() {
                     <td style={{ padding: "13px 16px", fontSize: 13.5, color: T.muted, whiteSpace: "nowrap" }}>{prettyDate(a.date)}</td>
                     <td style={{ padding: "13px 16px" }}><Badge text={a.method} palette={METHOD} /></td>
                     <td style={{ padding: "13px 16px" }}><InlineStatus value={a.status} onChange={(s) => updateStatus(a.id, s)} /></td>
+                    <td style={{ padding: "13px 16px" }}><TableDocs app={a} /></td>
                     <td style={{ padding: "13px 16px" }}>
                       {a.listing ? (
                         <a className="jt-link" href={a.listing} target="_blank" rel="noreferrer" style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 13, fontWeight: 500 }}>
@@ -601,7 +635,7 @@ export default function JobTracker() {
         </p>
       </main>
 
-      {modal && <FormModal state={modal} onClose={() => setModal(null)} onSave={save} />}
+      {modal && <FormModal state={modal} userId={session.user.id} onClose={() => setModal(null)} onSave={save} />}
       {draft && <DraftModal draft={draft} onClose={() => setDraft(null)} onDone={() => {
         markReminderDone(draft.app.id, draft.isSecond ? "follow2" : "follow1");
         setDraft(null);
@@ -718,7 +752,8 @@ function DraftModal({ draft, onClose, onDone }) {
 }
 
 /* ------------------------------ form modal -------------------------------- */
-function FormModal({ state, onClose, onSave }) {
+function FormModal({ state, userId, onClose, onSave }) {
+  const appId = state.id;
   const [f, setF] = useState(state.form);
   const [touched, setTouched] = useState(false);
   const set = (k, v) => setF(p => ({ ...p, [k]: v }));
@@ -770,6 +805,16 @@ function FormModal({ state, onClose, onSave }) {
           <Field label="Notes">
             <textarea className="jt-input" style={{ ...inp, minHeight: 68, resize: "vertical", fontFamily: "inherit" }} value={f.notes} onChange={e => set("notes", e.target.value)} placeholder="Recruiter name, next steps, follow-up dates…" />
           </Field>
+
+          <div>
+            <span style={{ display: "block", fontSize: 12.5, fontWeight: 600, color: T.muted, marginBottom: 8 }}>
+              Tailored documents <span style={{ color: T.faint, fontWeight: 500 }}>· PDF or Word, up to {MAX_DOC_MB} MB</span>
+            </span>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 15 }}>
+              <FileSlot label="Tailored résumé" kind="resume" value={f.resume} onChange={v => set("resume", v)} userId={userId} appId={appId} />
+              <FileSlot label="Tailored cover letter" kind="cover" value={f.cover} onChange={v => set("cover", v)} userId={userId} appId={appId} />
+            </div>
+          </div>
         </div>
 
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, padding: "16px 22px", borderTop: `1px solid ${T.border}`, background: "#FAFBFC" }}>
@@ -806,6 +851,98 @@ function Select({ value, onChange, options }) {
       <ChevronDown size={16} color={T.faint} style={{ position: "absolute", right: 11, top: "50%", transform: "translateY(-50%)", pointerEvents: "none" }} />
     </div>
   );
+}
+
+/* ---------------------------- file upload slot ---------------------------- */
+function FileSlot({ label, kind, value, onChange, userId, appId }) {
+  const inputRef = useRef(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const onPick = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // let the same file be picked again after a remove
+    if (!file) return;
+    setErr("");
+    if (!ALLOWED_EXT.has(extOf(file.name))) { setErr("Only PDF or Word (.pdf, .doc, .docx)."); return; }
+    if (file.size > MAX_DOC_MB * 1024 * 1024) { setErr(`Must be under ${MAX_DOC_MB} MB.`); return; }
+    setBusy(true);
+    try {
+      const meta = await uploadDoc(userId, appId, kind, file);
+      if (value?.path && value.path !== meta.path) removeDoc(value.path); // drop the replaced file
+      onChange(meta);
+    } catch (e2) {
+      setErr(e2?.message || "Upload failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const open = async () => {
+    setErr("");
+    try { window.open(await docUrl(value.path), "_blank", "noopener"); }
+    catch { setErr("Couldn't open the file."); }
+  };
+  const clear = () => { if (value?.path) removeDoc(value.path); onChange(null); };
+
+  return (
+    <div>
+      <span style={{ display: "block", fontSize: 12, fontWeight: 600, color: T.muted, marginBottom: 6 }}>{label}</span>
+      <input ref={inputRef} type="file" onChange={onPick} style={{ display: "none" }}
+        accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
+      {value ? (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", border: `1px solid ${T.border}`, borderRadius: 10, background: "#FAFBFC" }}>
+          <FileText size={18} color={T.accent} style={{ flexShrink: 0 }} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <button type="button" className="jt-link jt-btn" onClick={open} title={value.name}
+              style={{ display: "block", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", background: "none", border: "none", padding: 0, font: "inherit", fontSize: 13, fontWeight: 600, cursor: "pointer", textAlign: "left" }}>
+              {value.name}
+            </button>
+            <span style={{ fontSize: 11.5, color: T.faint }}>{value.size ? prettySize(value.size) : "file"}</span>
+          </div>
+          <button type="button" className="jt-icon-btn jt-btn" onClick={() => inputRef.current?.click()} disabled={busy} title="Replace"
+            style={{ border: "none", background: "none", padding: 6, borderRadius: 8, cursor: "pointer", color: T.muted }}>
+            <Upload size={15} />
+          </button>
+          <button type="button" className="jt-icon-btn jt-btn" onClick={clear} disabled={busy} title="Remove"
+            style={{ border: "none", background: "none", padding: 6, borderRadius: 8, cursor: "pointer", color: "#C0392B" }}>
+            <X size={15} />
+          </button>
+        </div>
+      ) : (
+        <button type="button" className="jt-btn" onClick={() => inputRef.current?.click()} disabled={busy}
+          style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "14px 12px", border: `1px dashed ${T.border}`, borderRadius: 10, background: "#fff", color: busy ? T.faint : T.muted, fontSize: 13, fontWeight: 600, fontFamily: "inherit", cursor: "pointer" }}>
+          {busy ? "Uploading…" : <><Upload size={16} /> Upload file</>}
+        </button>
+      )}
+      {err && <p style={{ margin: "6px 0 0", fontSize: 12, color: "#C0392B", fontWeight: 500 }}>{err}</p>}
+    </div>
+  );
+}
+
+/* --------- compact "open document" chips shown in the applications table --- */
+function DocOpen({ label, meta }) {
+  const [busy, setBusy] = useState(false);
+  const open = async () => {
+    setBusy(true);
+    try { window.open(await docUrl(meta.path), "_blank", "noopener"); }
+    catch { /* ignore — a stale/removed file */ }
+    finally { setBusy(false); }
+  };
+  return (
+    <button className="jt-btn" onClick={open} disabled={busy} title={meta.name}
+      style={{ display: "inline-flex", alignItems: "center", gap: 4, background: "#E3F5F3", color: T.accentDark, border: "none", padding: "4px 8px", borderRadius: 8, fontSize: 12, fontWeight: 600, fontFamily: "inherit", cursor: "pointer", opacity: busy ? .6 : 1 }}>
+      <FileText size={12} /> {label}
+    </button>
+  );
+}
+
+function TableDocs({ app }) {
+  const items = [];
+  if (app.resume) items.push({ key: "r", label: "Résumé", meta: app.resume });
+  if (app.cover) items.push({ key: "c", label: "Cover", meta: app.cover });
+  if (!items.length) return <span style={{ color: T.faint }}>—</span>;
+  return <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{items.map(it => <DocOpen key={it.key} label={it.label} meta={it.meta} />)}</div>;
 }
 
 /* ------------------------------- styles ----------------------------------- */
